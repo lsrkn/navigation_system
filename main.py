@@ -13,8 +13,8 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 import torch.nn as nn
 import pickle
-
-
+import math
+from path_buffer import PathBuffer
 
 
 # train_on_gpu = torch.cuda.is_available()
@@ -36,6 +36,37 @@ MAP_PATH = './map/test_map_crop.png'
 ENCODER_MODEL_PATH = './models/best_encoder_02_08.pth'
 EMBEDDINGS_PATH = "embeddings.pkl"
 MATRIX_PATH = "inv_cov_matrix.npy"
+
+# --- параметры буфера маршрута ---
+WAYPOINT_MIN_DISTANCE = 1.0    # м — шаг записи прямого пути
+WAYPOINT_REACHED_RADIUS = 0.8  # м — точка возврата считается пройденной
+PATH_SAVE_EVERY = 20           # сохранять на диск каждые N точек
+PATH_FILE = "path_stack.pkl"
+
+path_buffer = PathBuffer(min_distance=WAYPOINT_MIN_DISTANCE,
+                         reached_radius=WAYPOINT_REACHED_RADIUS)
+# Восстановить путь после сбоя предыдущего полёта.
+# ВНИМАНИЕ: при старте НОВОГО полёта файл нужно удалить,
+# иначе дрон «вернётся» по чужому маршруту.
+path_buffer.load(PATH_FILE)
+
+current_goto = None            # последняя отправленная цель возврата
+
+
+def send_goto(target_xy):
+    """Команда 'лететь в точку (x, y)' на полётный контроллер.
+    СЮДА вставить вызов вашего существующего интерфейса управления
+    (MAVLink SET_POSITION_TARGET_LOCAL_NED, DJI SDK и т.п.).
+    Пока железо не подключено — только лог."""
+    print(f"[PATH] GOTO -> x={target_xy[0]:.1f} y={target_xy[1]:.1f}")
+
+
+def return_home_requested():
+    """Триггер возврата. Варианты на выбор:
+    - канал с пульта (RC через MAVLink);
+    - заряд батареи ниже порога (телеметрия);
+    - ручной флаг для стендовых тестов — файл-маркер (ниже)."""
+    return os.path.exists("RETURN_HOME")   # создал файл — дрон поворачивает
 
 class RaspberryCamera:
     """
@@ -329,7 +360,37 @@ while True:
             if mahalanobis_distance < min_mahalanobis_distance:
                 min_mahalanobis_distance = mahalanobis_distance
                 closest_embeding_vector = embeding_vector
+         # === БУФЕР МАРШРУТА: запись прямого пути ===
+        if pos is not None and not path_buffer.is_returning:
+            if path_buffer.record(pos):
+                if len(path_buffer) % PATH_SAVE_EVERY == 0:
+                    path_buffer.save(PATH_FILE)
+         # === БУФЕР МАРШРУТА: режим возврата ===
+        if not path_buffer.is_returning and return_home_requested():
+            n = path_buffer.start_return(current_pos=pos)
+            print(f"[PATH] Возврат: {n} точек")
 
+        if path_buffer.is_returning:
+            target = path_buffer.next_waypoint()
+
+            if target is None:
+                # стек пуст — вернулись в стартовую точку
+                print("[PATH] Стартовая точка достигнута")
+                # здесь: команда на посадку / зависание
+                os.remove(PATH_FILE) if os.path.exists(PATH_FILE) else None
+
+            else:
+                # команду на контроллер отправляем ОДИН раз на точку
+                if target != current_goto:
+                    current_goto = target
+                    send_goto(target)
+
+                # подтверждение прохождения — по данным локализации
+                if pos is not None and \
+                   math.hypot(pos[0] - target[0], pos[1] - target[1]) < WAYPOINT_REACHED_RADIUS:
+                    path_buffer.confirm_reached()
+                    current_goto = None   # на следующей итерации придёт новая цель
+                       
     # print("Min mahal: ",min_mahalanobis_distance)
     # print("New Drone coords: ",embedings[tuple(closest_embeding_vector)])
     # print("Real Drone coords: ", drone.x, drone.y)
