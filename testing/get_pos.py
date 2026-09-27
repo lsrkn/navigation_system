@@ -7,6 +7,7 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 import torch.nn as nn
 import pickle
+from frame_transform import prepare_frame_for_model
 
 train_on_gpu = torch.cuda.is_available()
 
@@ -26,6 +27,15 @@ MAP_PATH = '../map/test_map_crop.png'
 ENCODER_MODEL_PATH = '../models/best_encoder_02_08.pth'
 EMBEDDINGS_PATH = "../embeddings.pkl"
 MATRIX_PATH = "../inv_cov_matrix.npy"
+
+def test_padding_stability(encoder, embeddings_db, tile_img, true_pos, ref_alt, P):
+    """Критический тест: не смещает ли паддинг argmax поиска."""
+    for h in [ref_alt * f for f in (0.6, 0.8, 1.0, 1.2, 1.5)]:
+        frame = prepare_frame_for_model(tile_img, h, ref_alt, P)
+        emb = encoder.predict(frame[None, ...])
+        best = match_embedding(emb, embeddings_db)   # существующая логика поиска
+        ok = (best.pos == true_pos)
+        print(f"h={h:.1f}м  найдено={best.pos}  {'OK' if ok else 'СБОЙ'}")
 
 def load_matrix(filename):
     """
