@@ -13,7 +13,12 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 import torch.nn as nn
 import pickle
+from altimeter import Altimeter
+from frame_transform import prepare_frame_for_model
 
+REFERENCE_ALTITUDE = 10.0   # X: высота, которой соответствуют тайлы из 1_prepare_dataset.ipynb
+MODEL_INPUT_SIZE = 128      # P: входная сторона энкодера best_encoder_02_08.pth
+ALTIMETER_MODE = "sim"      # "bmp" | "laser" | "sim"
 
 
 
@@ -36,6 +41,7 @@ MAP_PATH = './map/test_map_crop.png'
 ENCODER_MODEL_PATH = './models/best_encoder_02_08.pth'
 EMBEDDINGS_PATH = "embeddings.pkl"
 MATRIX_PATH = "inv_cov_matrix.npy"
+altimeter = Altimeter(mode=ALTIMETER_MODE)
 
 class RaspberryCamera:
     """
@@ -321,6 +327,9 @@ while True:
 
     min_mahalanobis_distance = np.inf
     closest_embeding_vector = None
+    altitude = altimeter.get_altitude()
+    frame_ready = prepare_frame_for_model(frame, altitude,
+                                          REFERENCE_ALTITUDE, MODEL_INPUT_SIZE)
     # тут нужно потом сравнивать не со всеми а только с ближайшими
     for embeding_vector in  embedings.keys():
         if nearbyAreaCheck(drone, embedings, embeding_vector):
