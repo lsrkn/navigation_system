@@ -27,20 +27,16 @@ import pickle
 device = torch.device('cpu')
 
 # Constants
-TILE_STEP = 50
-TILE_SIZE = 300
-ENCODED_SPACE_DIM = 256
-NEARBY_DELTA = 300
-MAP_PATH = './map/test_map_crop.png'
-ENCODER_MODEL_PATH = './models/best_encoder_02_08.pth'
-EMBEDDINGS_PATH = "embeddings.pkl"
-MATRIX_PATH = "inv_cov_matrix.npy"
+TILE_STEP = 50  # Шаг для генерации тайлов карты (используется в 1_prepare_dataset.ipynb для создания датасета)
+TILE_SIZE = 300  # Размер тайла (изображения) для обучения и инференса (300x300 пикселей)
+ENCODED_SPACE_DIM = 256  # Размерность латентного пространства (эмбеддингов) автоэнкодера
+NEARBY_DELTA = 300  # Радиус для поиска ближайших эмбеддингов (порог для фильтрации по расстоянию)
+MAP_PATH = './map/test_map_crop.png'  # Путь к изображению карты
+ENCODER_MODEL_PATH = './models/best_encoder_02_08.pth'  # Путь к обученной модели энкодера
+EMBEDDINGS_PATH = "embeddings.pkl"  # Путь к файлу с сохраненными эмбеддингами (создается в 3_prepare_emb_matx_test.ipynb)
+MATRIX_PATH = "inv_cov_matrix.npy"  # Путь к файлу с инверсной ковариационной матрицей (создается в 3_prepare_emb_matx_test.ipynb)
 
 class RaspberryCamera:
-    """
-    Класс для работы с камерой Raspberry Pi.
-    Предоставляет базовый функционал для получения и сохранения изображений.
-    """
     
     def __init__(self, resolution=(1920, 1080)):
         """
@@ -49,9 +45,9 @@ class RaspberryCamera:
         Args:
             resolution (tuple): Кортеж (ширина, высота) для установки разрешения камеры
         """
-        self.camera = None
-        self.resolution = resolution
-        self.is_initialized = False
+        self.camera = None  # Объект камеры Picamera2
+        self.resolution = resolution  # Разрешение камеры
+        self.is_initialized = False  # Флаг успешной инициализации
     
     def initialize(self):
         """
@@ -65,7 +61,7 @@ class RaspberryCamera:
             
             # Настройка конфигурации камеры
             config = self.camera.create_still_configuration(
-                main={"size": self.resolution}
+                main={"size": self.resolution}  # Установка разрешения
             )
             self.camera.configure(config)
             
@@ -165,7 +161,7 @@ def load_matrix(filename):
     numpy array - загруженная матрица
     """
     try:
-        matrix = np.load(filename)
+        matrix = np.load(filename)  # Загрузка матрицы из файла
         print(f"Матрица успешно загружена из файла {filename}")
         return matrix
     except Exception as e:
@@ -175,7 +171,7 @@ def load_matrix(filename):
 def load_embeddings_from_file(filename):
     try:
         with open(filename, 'rb') as file:
-            embeddings = pickle.load(file)
+            embeddings = pickle.load(file)  # Загрузка словаря из файла
         print(f"Эмбеддинги успешно загружены из файла {filename}")
         return embeddings
     except Exception as e:
@@ -184,6 +180,13 @@ def load_embeddings_from_file(filename):
 
 class Drone:
     def __init__(self, id, x, y, z):
+        """
+        Args:
+            id: Идентификатор дрона (не используется в логике, но может быть полезен).
+            x (float): Координата X дрона на карте.
+            y (float): Координата Y дрона на карте.
+            z (float): Координата Z (высота) дрона (не используется в текущей версии).
+        """
         self.id = id
         self.x = x
         self.y = y
@@ -192,64 +195,108 @@ class Drone:
 class Encoder(nn.Module):
 
     def __init__(self, ENCODED_SPACE_DIM):
+        """
+        Args:
+            ENCODED_SPACE_DIM (int): Размерность выходного эмбеддинга (латентного пространства).
+        """
         super().__init__()
         
         self.encoded_space_dim = ENCODED_SPACE_DIM
         ### Convolutional section
         self.encoder_cnn = nn.Sequential(
-            nn.Conv2d(3, 8, 4, stride=2, padding=0),
+            nn.Conv2d(3, 8, 4, stride=2, padding=0),  # Входной слой: 3 канала (RGB), выход 8 каналов, ядро 4x4, шаг 2
+            nn.ReLU(True),  # Функция активации ReLU
+            nn.Conv2d(8, 16, 4, stride=2, padding=0),  # Скрытый слой: 8 -> 16 каналов, ядро 4x4, шаг 2
+            nn.BatchNorm2d(16),  # Нормализация по батчу
             nn.ReLU(True),
-            nn.Conv2d(8, 16, 4, stride=2, padding=0),
-            nn.BatchNorm2d(16),
+            nn.Conv2d(16, 32, 4, stride=2, padding=0),  # Скрытый слой: 16 -> 32 канала, ядро 4x4, шаг 2
             nn.ReLU(True),
-            nn.Conv2d(16, 32, 4, stride=2, padding=0),
+            nn.Conv2d(32, 64, 4, stride=2, padding=0),  # Скрытый слой: 32 -> 64 канала, ядро 4x4, шаг 2
             nn.ReLU(True),
-            nn.Conv2d(32, 64, 4, stride=2, padding=0),
-            nn.ReLU(True),
-            nn.Conv2d(64, 128, 4, stride=2, padding=1),
+            nn.Conv2d(64, 128, 4, stride=2, padding=1),  # Скрытый слой: 64 -> 128 каналов, ядро 4x4, шаг 2
             nn.ReLU(True)
         )
         
-        ### Flatten layer
+        # Слой для преобразования тензора в вектор (flattening)
         self.flatten = nn.Flatten(start_dim=1)
-        ### Linear section
+        # Полносвязная часть энкодера
         self.encoder_lin = nn.Sequential(
-            nn.Linear(8 * 8 * 128, 1024),
+            nn.Linear(8 * 8 * 128, 1024),  # Вход: 8*8*128 (выход сверточной части для входа 300x300), выход: 1024
             nn.ReLU(True),
-            nn.Linear(1024, ENCODED_SPACE_DIM)
+            nn.Linear(1024, ENCODED_SPACE_DIM)  # Выходной слой: 1024 -> ENCODED_SPACE_DIM (размерность эмбеддинга)
         )
         
     def forward(self, x):
-        x = self.encoder_cnn(x)
-        x = self.flatten(x)
-        x = self.encoder_lin(x)
+        """
+        Прямой проход через энкодер.
+        
+        Args:
+            x (torch.Tensor): Входной тензор изображения (батч x каналы x высота x ширина).
+        
+        Returns:
+            torch.Tensor: Выходной тензор эмбеддингов (батч x ENCODED_SPACE_DIM).
+        """
+        x = self.encoder_cnn(x)  # Прохождение через сверточные слои
+        x = self.flatten(x)  # Преобразование в вектор
+        x = self.encoder_lin(x)  # Прохождение через полносвязные слои
         return x 
 
 def image_to_tensor(image):
-    fpv_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    transform=transforms.ToTensor()
-    fpv_image = transform(fpv_image)
-    fpv_image = fpv_image.unsqueeze(0)
-    # print("Image shape:",fpv_image.shape)
+    """
+    Преобразует изображение из numpy array (BGR) в тензор PyTorch (RGB).
+    
+    Args:
+        image (numpy.ndarray): Изображение в формате numpy array (BGR, от OpenCV или камеры).
+    
+    Returns:
+        torch.Tensor: Тензор изображения (1 x C x H x W), готовый для подачи в нейронную сеть.
+    """
+    fpv_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # Преобразование цветового пространства из BGR (OpenCV) в RGB
+    transform=transforms.ToTensor()  # Создание объекта преобразования для конвертации в тензор
+    fpv_image = transform(fpv_image)  # Применение преобразования
+    fpv_image = fpv_image.unsqueeze(0)  # Добавление размерности батча (unsqueeze(0))
+    # print("Image shape:",fpv_image.shape)  # Вывод формы тензора (закомментировано для отладки)
     return fpv_image
 
 def image_to_embeding(inputs):
-     
-    encoder = Encoder(ENCODED_SPACE_DIM=256)
+     """
+    Преобразует тензор изображения в эмбеддинг с помощью обученного энкодера.
+    
+    Args:
+        inputs (torch.Tensor): Тензор изображения (1 x C x H x W).
+    
+    Returns:
+        numpy.ndarray: Массив эмбеддингов (1 x ENCODED_SPACE_DIM) в виде numpy array.
+    """
+    encoder = Encoder(ENCODED_SPACE_DIM=256)  # Создание экземпляра энкодера с размерностью 256
     encoder.to(device)
-    best_encoder = torch.load(ENCODER_MODEL_PATH, weights_only=True, map_location=device)
-    encoder.load_state_dict(best_encoder)  
-    encoder.eval()
+    best_encoder = torch.load(ENCODER_MODEL_PATH, weights_only=True, map_location=device)  # Загрузка обученной модели энкодера
+    encoder.load_state_dict(best_encoder)  # Загрузка весов в модель
+    encoder.eval()  # Перевод модели в режим оценки (inference)
     with torch.no_grad():
-        inputs = inputs.to(device)
-        coded= encoder(inputs)
+        # Вычисление эмбеддинга без вычисления градиентов
+        inputs = inputs.to(device)  # Перемещение входных данных на устройство
+        coded= encoder(inputs)  # Получение эмбеддинга от энкодера
         coded = coded.cpu().numpy()
         print("Image coded emb shape:",coded.shape)
         return coded
 
 def nearbyAreaCheck(drone, embedings, embeding_vector):
+    """
+    Проверяет, находится ли эмбеддинг в пределах заданного радиуса (NEARBY_DELTA) от текущей позиции дрона.
+    
+    Args:
+        drone (Drone): Объект дрона с текущими координатами (x, y).
+        embedings (dict): Словарь эмбеддингов (ключ: эмбеддинг, значение: [x, y]).
+        embeding_vector (numpy.ndarray): Эмбеддинг для проверки.
+    
+    Returns:
+        bool: True если эмбеддинг находится в пределах радиуса, иначе False.
+    """
+    # Получение координат, соответствующих эмбеддингу
     x = embedings[tuple(embeding_vector)][0]
     y = embedings[tuple(embeding_vector)][1]
+    # Проверка условия близости по обеим координатам
     if abs(x-drone.x) < NEARBY_DELTA and abs(y-drone.y) < NEARBY_DELTA:
         return True
     else:
@@ -300,26 +347,27 @@ def process_image_to_square(image_array, target_size=TILE_SIZE):
 
 
 
-# drone start coords
+# Инициализация дрона с начальными координатами
 drone = Drone(0, 333, 777, 0)
 
-embedings = load_embeddings_from_file(EMBEDDINGS_PATH) 
-inv_cov_matrix = load_matrix(MATRIX_PATH)
+# Загрузка эмбеддингов и инверсной ковариационной матрицы
+embedings = load_embeddings_from_file(EMBEDDINGS_PATH)  # Словарь эмбеддингов
+inv_cov_matrix = load_matrix(MATRIX_PATH)  # Инверсная ковариационная матрица
 
 while True:
     # get image from camera
     with RaspberryCamera() as camera:
         # Получаем изображение
         image = camera.capture_image()
-        image = process_image_to_square(image)
+        image = process_image_to_square(image)  # Обрабатываем изображение (обрезка до квадрата 300x300)
     
-    fpv_image = image_to_tensor(image)
+    fpv_image = image_to_tensor(image)  # Преобразуем изображение в тензор
 
     # image to encoder
     encoded_image = image_to_embeding(fpv_image).flatten()
 
-    min_mahalanobis_distance = np.inf
-    closest_embeding_vector = None
+    min_mahalanobis_distance = np.inf  # Минимальное расстояние Махаланобиса
+    closest_embeding_vector = None  # Ближайший эмбеддинг
     # тут нужно потом сравнивать не со всеми а только с ближайшими
     for embeding_vector in  embedings.keys():
         if nearbyAreaCheck(drone, embedings, embeding_vector):
